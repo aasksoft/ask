@@ -2,13 +2,8 @@
 
 ## 3.10.0
 
-### Minor Changes
-
 -   9d5772c: Add import path aliasing to the webview
 -   2193847: Add Support for Bytedance Doubao
-
-### Patch Changes
-
 -   cc2f8e7: fix: Prevent duplicate BOM
 -   8ad21f2: factor out servers list
 -   894fa35: adding gemini 2.5 pro preview
