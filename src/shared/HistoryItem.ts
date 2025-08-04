@@ -10,5 +10,8 @@ export type HistoryItem = {
 
 	size?: number
 	shadowGitConfigWorkTree?: string
+	cwdOnTaskInitialization?: string
 	conversationHistoryDeletedRange?: [number, number]
+	isFavorited?: boolean
+	checkpointTrackerErrorMessage?: string
 }

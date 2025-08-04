@@ -1,36 +1,60 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import { Stream as AnthropicStream } from "@anthropic-ai/sdk/streaming"
 import { withRetry } from "../retry"
-import { anthropicDefaultModelId, AnthropicModelId, anthropicModels, ApiHandlerOptions, ModelInfo } from "../../shared/api"
+import { anthropicDefaultModelId, AnthropicModelId, anthropicModels, ApiHandlerOptions, ModelInfo } from "@shared/api"
 import { ApiHandler } from "../index"
 import { ApiStream } from "../transform/stream"
 
-export class AnthropicHandler implements ApiHandler {
-	private options: ApiHandlerOptions
-	private client: Anthropic
+interface AnthropicHandlerOptions {
+	apiKey?: string
+	anthropicBaseUrl?: string
+	apiModelId?: string
+	thinkingBudgetTokens?: number
+}
 
-	constructor(options: ApiHandlerOptions) {
+export class AnthropicHandler implements ApiHandler {
+	private options: AnthropicHandlerOptions
+	private client: Anthropic | undefined
+
+	constructor(options: AnthropicHandlerOptions) {
 		this.options = options
-		this.client = new Anthropic({
-			apiKey: this.options.apiKey,
-			baseURL: this.options.anthropicBaseUrl || undefined,
-		})
+	}
+
+	private ensureClient(): Anthropic {
+		if (!this.client) {
+			if (!this.options.apiKey) {
+				throw new Error("Anthropic API key is required")
+			}
+			try {
+				this.client = new Anthropic({
+					apiKey: this.options.apiKey,
+					baseURL: this.options.anthropicBaseUrl || undefined,
+				})
+			} catch (error) {
+				throw new Error(`Error creating Anthropic client: ${error.message}`)
+			}
+		}
+		return this.client
 	}
 
 	@withRetry()
 	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): ApiStream {
+		const client = this.ensureClient()
+
 		const model = this.getModel()
 		let stream: AnthropicStream<Anthropic.RawMessageStreamEvent>
 		const modelId = model.id
 
 		const budget_tokens = this.options.thinkingBudgetTokens || 0
-		const reasoningOn = modelId.includes("3-7") && budget_tokens !== 0 ? true : false
+		const reasoningOn = (modelId.includes("3-7") || modelId.includes("4-")) && budget_tokens !== 0 ? true : false
 
 		switch (modelId) {
 			// 'latest' alias does not support cache_control
+			case "claude-sonnet-4-20250514":
 			case "claude-3-7-sonnet-20250219":
 			case "claude-3-5-sonnet-20241022":
 			case "claude-3-5-haiku-20241022":
+			case "claude-opus-4-20250514":
 			case "claude-3-opus-20240229":
 			case "claude-3-haiku-20240307": {
 				/*
@@ -42,7 +66,7 @@ export class AnthropicHandler implements ApiHandler {
 				)
 				const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1
 				const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1
-				stream = await this.client.messages.create(
+				stream = await client.messages.create(
 					{
 						model: modelId,
 						thinking: reasoningOn ? { type: "enabled", budget_tokens: budget_tokens } : undefined,
@@ -96,6 +120,8 @@ export class AnthropicHandler implements ApiHandler {
 						// https://github.com/anthropics/anthropic-sdk-typescript?tab=readme-ov-file#default-headers
 						// https://github.com/anthropics/anthropic-sdk-typescript/commit/c920b77fc67bd839bfeb6716ceab9d7c9bbe7393
 						switch (modelId) {
+							case "claude-sonnet-4-20250514":
+							case "claude-opus-4-20250514":
 							case "claude-3-7-sonnet-20250219":
 							case "claude-3-5-sonnet-20241022":
 							case "claude-3-5-haiku-20241022":
@@ -114,7 +140,7 @@ export class AnthropicHandler implements ApiHandler {
 				break
 			}
 			default: {
-				stream = (await this.client.messages.create({
+				stream = await client.messages.create({
 					model: modelId,
 					max_tokens: model.info.maxTokens || 8192,
 					temperature: 0,
@@ -123,13 +149,13 @@ export class AnthropicHandler implements ApiHandler {
 					// tools,
 					// tool_choice: { type: "auto" },
 					stream: true,
-				})) as any
+				})
 				break
 			}
 		}
 
 		for await (const chunk of stream) {
-			switch (chunk.type) {
+			switch (chunk?.type) {
 				case "message_start":
 					// tells us cache reads/writes/input/output
 					const usage = chunk.message.usage

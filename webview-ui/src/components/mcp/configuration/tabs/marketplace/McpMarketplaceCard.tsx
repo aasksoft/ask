@@ -1,33 +1,28 @@
-import { useCallback, useState, useRef, useMemo } from "react"
-import styled from "styled-components"
+import { McpServiceClient } from "@/services/grpc-client"
 import { McpMarketplaceItem, McpServer } from "@shared/mcp"
-import { vscode } from "@/utils/vscode"
-import { useEvent } from "react-use"
+import { StringRequest } from "@shared/proto/cline/common"
+import { useEffect, useMemo, useRef, useState } from "react"
+import styled from "styled-components"
+import { useExtensionState } from "@/context/ExtensionStateContext"
 
 interface McpMarketplaceCardProps {
 	item: McpMarketplaceItem
 	installedServers: McpServer[]
+	setError: (error: string | null) => void
 }
 
-const McpMarketplaceCard = ({ item, installedServers }: McpMarketplaceCardProps) => {
+const McpMarketplaceCard = ({ item, installedServers, setError }: McpMarketplaceCardProps) => {
 	const isInstalled = installedServers.some((server) => server.name === item.mcpId)
 	const [isDownloading, setIsDownloading] = useState(false)
 	const [isLoading, setIsLoading] = useState(false)
 	const githubLinkRef = useRef<HTMLDivElement>(null)
+	const { onRelinquishControl } = useExtensionState()
 
-	const handleMessage = useCallback((event: MessageEvent) => {
-		const message = event.data
-		switch (message.type) {
-			case "mcpDownloadDetails":
-				setIsDownloading(false)
-				break
-			case "relinquishControl":
-				setIsLoading(false)
-				break
-		}
-	}, [])
-
-	useEvent("message", handleMessage)
+	useEffect(() => {
+		return onRelinquishControl(() => {
+			setIsLoading(false)
+		})
+	}, [onRelinquishControl])
 
 	const githubAuthorUrl = useMemo(() => {
 		const url = new URL(item.githubUrl)
@@ -107,15 +102,28 @@ const McpMarketplaceCard = ({ item, installedServers }: McpMarketplaceCardProps)
 								{item.name}
 							</h3>
 							<div
-								onClick={(e) => {
+								onClick={async (e) => {
 									e.preventDefault() // Prevent card click when clicking install
 									e.stopPropagation() // Stop event from bubbling up to parent link
 									if (!isInstalled && !isDownloading) {
 										setIsDownloading(true)
-										vscode.postMessage({
-											type: "downloadMcp",
-											mcpId: item.mcpId,
-										})
+										try {
+											const response = await McpServiceClient.downloadMcp(
+												StringRequest.create({ value: item.mcpId }),
+											)
+											if (response.error) {
+												console.error("MCP download failed:", response.error)
+												setError(response.error)
+											} else {
+												console.log("MCP download successful:", response)
+												// Clear any previous errors on success
+												setError(null)
+											}
+										} catch (error) {
+											console.error("Failed to download MCP:", error)
+										} finally {
+											setIsDownloading(false)
+										}
 									}
 								}}
 								style={{}}>
@@ -181,7 +189,7 @@ const McpMarketplaceCard = ({ item, installedServers }: McpMarketplaceCardProps)
 								<span className="codicon codicon-star-full" />
 								<span style={{ wordBreak: "break-all" }}>{item.githubStars?.toLocaleString() ?? 0}</span>
 							</div>
-							{/* <div
+							<div
 								style={{
 									display: "flex",
 									alignItems: "center",
@@ -191,7 +199,7 @@ const McpMarketplaceCard = ({ item, installedServers }: McpMarketplaceCardProps)
 								}}>
 								<span className="codicon codicon-cloud-download" />
 								<span style={{ wordBreak: "break-all" }}>{item.downloadCount?.toLocaleString() ?? 0}</span>
-							</div> */}
+							</div>
 							{item.requiresApiKey && (
 								<span className="codicon codicon-key" title="Requires API key" style={{ flexShrink: 0 }} />
 							)}

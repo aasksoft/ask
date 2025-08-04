@@ -1,7 +1,16 @@
-import { McpServer } from "@shared/mcp"
-import { DEFAULT_MCP_TIMEOUT_SECONDS } from "@shared/mcp"
-import { useState } from "react"
-import { vscode } from "@/utils/vscode"
+import DangerButton from "@/components/common/DangerButton"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { McpServiceClient } from "@/services/grpc-client"
+import { getMcpServerDisplayName } from "@/utils/mcp"
+import { DEFAULT_MCP_TIMEOUT_SECONDS, McpServer } from "@shared/mcp"
+import { convertProtoMcpServersToMcpServers } from "@shared/proto-conversions/mcp/mcp-server-conversion"
+import { StringRequest } from "@shared/proto/cline/common"
+import {
+	McpServers,
+	ToggleMcpServerRequest,
+	ToggleToolAutoApproveRequest,
+	UpdateMcpTimeoutRequest,
+} from "@shared/proto/cline/mcp"
 import {
 	VSCodeButton,
 	VSCodeCheckbox,
@@ -11,20 +20,40 @@ import {
 	VSCodePanelTab,
 	VSCodePanelView,
 } from "@vscode/webview-ui-toolkit/react"
-import { getMcpServerDisplayName } from "@/utils/mcp"
-import DangerButton from "@/components/common/DangerButton"
-import McpToolRow from "./McpToolRow"
+import { useCallback, useState } from "react"
 import McpResourceRow from "./McpResourceRow"
-import { useExtensionState } from "@/context/ExtensionStateContext"
+import McpToolRow from "./McpToolRow"
+// constant JSX.Elements
+const TimeoutOptions = [
+	{ value: "30", label: "30 seconds" },
+	{ value: "60", label: "1 minute" },
+	{ value: "300", label: "5 minutes" },
+	{ value: "600", label: "10 minutes" },
+	{ value: "1800", label: "30 minutes" },
+	{ value: "3600", label: "1 hour" },
+].map((option) => (
+	<VSCodeOption key={option.value} value={option.value}>
+		{option.label}
+	</VSCodeOption>
+))
 
-const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpandable?: boolean }) => {
-	const { mcpMarketplaceCatalog, autoApprovalSettings } = useExtensionState()
+const ServerRow = ({
+	server,
+	isExpandable = true,
+	hasTrashIcon = true,
+}: {
+	server: McpServer
+	isExpandable?: boolean
+	hasTrashIcon?: boolean
+}) => {
+	const { mcpMarketplaceCatalog, autoApprovalSettings, setMcpServers } = useExtensionState()
 
 	const [isExpanded, setIsExpanded] = useState(false)
 	const [isDeleting, setIsDeleting] = useState(false)
+	const [isRestarting, setIsRestarting] = useState(false)
 
-	const getStatusColor = () => {
-		switch (server.status) {
+	const getStatusColor = useCallback((status: McpServer["status"]) => {
+		switch (status) {
 			case "connected":
 				return "var(--vscode-testing-iconPassed)"
 			case "connecting":
@@ -32,7 +61,7 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 			case "disconnected":
 				return "var(--vscode-testing-iconFailed)"
 		}
-	}
+	}, [])
 
 	const handleRowClick = () => {
 		if (!server.error && isExpandable) {
@@ -49,51 +78,95 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 		}
 	})
 
-	const timeoutOptions = [
-		{ value: "30", label: "30 seconds" },
-		{ value: "60", label: "1 minute" },
-		{ value: "300", label: "5 minutes" },
-		{ value: "600", label: "10 minutes" },
-		{ value: "1800", label: "30 minutes" },
-		{ value: "3600", label: "1 hour" },
-	]
-
 	const handleTimeoutChange = (e: any) => {
 		const select = e.target as HTMLSelectElement
 		const value = select.value
 		const num = parseInt(value)
 		setTimeoutValue(value)
-		vscode.postMessage({
-			type: "updateMcpTimeout",
+
+		McpServiceClient.updateMcpTimeout({
 			serverName: server.name,
 			timeout: num,
-		})
+		} as UpdateMcpTimeoutRequest)
+			.then((response: McpServers) => {
+				const mcpServers = convertProtoMcpServersToMcpServers(response.mcpServers)
+				setMcpServers(mcpServers)
+			})
+			.catch((error) => {
+				console.error("Error updating MCP server timeout", error)
+			})
 	}
 
 	const handleRestart = () => {
-		vscode.postMessage({
-			type: "restartMcpServer",
-			text: server.name,
-		})
+		// Set local state to show "connecting" status
+		setIsRestarting(true)
+
+		// Make the gRPC call
+		McpServiceClient.restartMcpServer({
+			value: server.name,
+		} as StringRequest)
+			.then((response: McpServers) => {
+				// Update with the final state from the server
+				const mcpServers = convertProtoMcpServersToMcpServers(response.mcpServers)
+				setMcpServers(mcpServers)
+				setIsRestarting(false)
+			})
+			.catch((error) => {
+				// Reset the restarting state
+				setIsRestarting(false)
+				console.error("Error restarting MCP server", error)
+			})
 	}
 
 	const handleDelete = () => {
 		setIsDeleting(true)
-		vscode.postMessage({
-			type: "deleteMcpServer",
-			serverName: server.name,
-		})
+		McpServiceClient.deleteMcpServer({
+			value: server.name,
+		} as StringRequest)
+			.then((response: McpServers) => {
+				const mcpServers = convertProtoMcpServersToMcpServers(response.mcpServers)
+				setMcpServers(mcpServers)
+				setIsDeleting(false)
+			})
+			.catch((error) => {
+				console.error("Error deleting MCP server", error)
+				setIsDeleting(false)
+			})
 	}
 
 	const handleAutoApproveChange = () => {
 		if (!server.name) return
 
-		vscode.postMessage({
-			type: "toggleToolAutoApprove",
-			serverName: server.name,
-			toolNames: server.tools?.map((tool) => tool.name) || [],
-			autoApprove: !server.tools?.every((tool) => tool.autoApprove),
-		})
+		McpServiceClient.toggleToolAutoApprove(
+			ToggleToolAutoApproveRequest.create({
+				serverName: server.name,
+				toolNames: server.tools?.map((tool) => tool.name) || [],
+				autoApprove: !server.tools?.every((tool) => tool.autoApprove),
+			}),
+		)
+			.then((response) => {
+				const mcpServers = convertProtoMcpServersToMcpServers(response.mcpServers)
+				setMcpServers(mcpServers)
+			})
+			.catch((error) => {
+				console.error("Error toggling all tools auto-approve", error)
+			})
+	}
+
+	const handleToggleMcpServer = () => {
+		McpServiceClient.toggleMcpServer(
+			ToggleMcpServerRequest.create({
+				serverName: server.name,
+				disabled: !server.disabled,
+			}),
+		)
+			.then((response) => {
+				const mcpServers = convertProtoMcpServersToMcpServers(response.mcpServers)
+				setMcpServers(mcpServers)
+			})
+			.catch((error) => {
+				console.error("Error toggling MCP server", error)
+			})
 	}
 
 	return (
@@ -135,19 +208,21 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 								e.stopPropagation()
 								handleRestart()
 							}}
-							disabled={server.status === "connecting"}>
+							disabled={server.status === "connecting" || isRestarting}>
 							<span className="codicon codicon-sync"></span>
 						</VSCodeButton>
-						<VSCodeButton
-							appearance="icon"
-							title="Delete Server"
-							onClick={(e) => {
-								e.stopPropagation()
-								handleDelete()
-							}}
-							disabled={isDeleting}>
-							<span className="codicon codicon-trash"></span>
-						</VSCodeButton>
+						{hasTrashIcon && (
+							<VSCodeButton
+								appearance="icon"
+								title="Delete Server"
+								onClick={(e) => {
+									e.stopPropagation()
+									handleDelete()
+								}}
+								disabled={isDeleting}>
+								<span className="codicon codicon-trash"></span>
+							</VSCodeButton>
+						)}
 					</div>
 				)}
 				{/* Toggle Switch */}
@@ -169,20 +244,12 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 							opacity: server.disabled ? 0.5 : 0.9,
 						}}
 						onClick={() => {
-							vscode.postMessage({
-								type: "toggleMcpServer",
-								serverName: server.name,
-								disabled: !server.disabled,
-							})
+							handleToggleMcpServer()
 						}}
 						onKeyDown={(e) => {
 							if (e.key === "Enter" || e.key === " ") {
 								e.preventDefault()
-								vscode.postMessage({
-									type: "toggleMcpServer",
-									serverName: server.name,
-									disabled: !server.disabled,
-								})
+								handleToggleMcpServer()
 							}
 						}}>
 						<div
@@ -205,7 +272,7 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 						width: "8px",
 						height: "8px",
 						borderRadius: "50%",
-						background: getStatusColor(),
+						background: getStatusColor(server.status),
 						marginLeft: "8px",
 					}}
 				/>
@@ -237,7 +304,7 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 							width: "calc(100% - 20px)",
 							margin: "0 10px 10px 10px",
 						}}>
-						{server.status === "connecting" ? "Retrying..." : "Retry Connection"}
+						{server.status === "connecting" || isRestarting ? "Retrying..." : "Retry Connection"}
 					</VSCodeButton>
 
 					<DangerButton
@@ -327,22 +394,18 @@ const ServerRow = ({ server, isExpandable = true }: { server: McpServer; isExpan
 						<div style={{ margin: "10px 7px" }}>
 							<label style={{ display: "block", marginBottom: "4px", fontSize: "13px" }}>Request Timeout</label>
 							<VSCodeDropdown style={{ width: "100%" }} value={timeoutValue} onChange={handleTimeoutChange}>
-								{timeoutOptions.map((option) => (
-									<VSCodeOption key={option.value} value={option.value}>
-										{option.label}
-									</VSCodeOption>
-								))}
+								{TimeoutOptions}
 							</VSCodeDropdown>
 						</div>
 						<VSCodeButton
 							appearance="secondary"
 							onClick={handleRestart}
-							disabled={server.status === "connecting"}
+							disabled={server.status === "connecting" || isRestarting}
 							style={{
 								width: "calc(100% - 14px)",
 								margin: "0 7px 3px 7px",
 							}}>
-							{server.status === "connecting" ? "Restarting..." : "Restart Server"}
+							{server.status === "connecting" || isRestarting ? "Restarting..." : "Restart Server"}
 						</VSCodeButton>
 
 						<DangerButton

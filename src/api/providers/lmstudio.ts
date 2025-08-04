@@ -1,33 +1,50 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 import { ApiHandler } from "../"
-import { ApiHandlerOptions, ModelInfo, openAiModelInfoSaneDefaults } from "../../shared/api"
+import { ApiHandlerOptions, ModelInfo, openAiModelInfoSaneDefaults } from "@shared/api"
 import { convertToOpenAiMessages } from "../transform/openai-format"
 import { ApiStream } from "../transform/stream"
+import { withRetry } from "../retry"
+
+interface LmStudioHandlerOptions {
+	lmStudioBaseUrl?: string
+	lmStudioModelId?: string
+}
 
 export class LmStudioHandler implements ApiHandler {
-	private options: ApiHandlerOptions
-	private client: OpenAI
+	private options: LmStudioHandlerOptions
+	private client: OpenAI | undefined
 
-	constructor(options: ApiHandlerOptions) {
+	constructor(options: LmStudioHandlerOptions) {
 		this.options = options
-		this.client = new OpenAI({
-			baseURL: (this.options.lmStudioBaseUrl || "http://localhost:1234") + "/v1",
-			apiKey: "noop",
-		})
 	}
 
+	private ensureClient(): OpenAI {
+		if (!this.client) {
+			try {
+				this.client = new OpenAI({
+					baseURL: (this.options.lmStudioBaseUrl || "http://localhost:1234") + "/v1",
+					apiKey: "noop",
+				})
+			} catch (error) {
+				throw new Error(`Error creating LM Studio client: ${error.message}`)
+			}
+		}
+		return this.client
+	}
+
+	@withRetry({ retryAllErrors: true })
 	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): ApiStream {
+		const client = this.ensureClient()
 		const openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
 			{ role: "system", content: systemPrompt },
 			...convertToOpenAiMessages(messages),
 		]
 
 		try {
-			const stream = await this.client.chat.completions.create({
+			const stream = await client.chat.completions.create({
 				model: this.getModel().id,
 				messages: openAiMessages,
-				temperature: 0,
 				stream: true,
 			})
 			for await (const chunk of stream) {
@@ -36,6 +53,12 @@ export class LmStudioHandler implements ApiHandler {
 					yield {
 						type: "text",
 						text: delta.content,
+					}
+				}
+				if (delta && "reasoning_content" in delta && delta.reasoning_content) {
+					yield {
+						type: "reasoning",
+						reasoning: (delta.reasoning_content as string | undefined) || "",
 					}
 				}
 			}

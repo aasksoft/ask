@@ -15,20 +15,41 @@ export function insertMention(text: string, position: number, value: string): { 
 	// Find the position of the last '@' symbol before the cursor
 	const lastAtIndex = beforeCursor.lastIndexOf("@")
 
+	// For file/folder paths that contain spaces, wrap them in quotes
+	let formattedValue = value
+	if (value.startsWith("/") && value.includes(" ")) {
+		formattedValue = `"${value}"`
+	}
+
 	let newValue: string
 	let mentionIndex: number
 
 	if (lastAtIndex !== -1) {
 		// If there's an '@' symbol, replace everything after it with the new mention
 		const beforeMention = text.slice(0, lastAtIndex)
-		newValue = beforeMention + "@" + value + " " + afterCursor.replace(/^[^\s]*/, "")
+		newValue = beforeMention + "@" + formattedValue + " " + afterCursor.replace(/^[^\s]*/, "")
 		mentionIndex = lastAtIndex
 	} else {
 		// If there's no '@' symbol, insert the mention at the cursor position
-		newValue = beforeCursor + "@" + value + " " + afterCursor
+		newValue = beforeCursor + "@" + formattedValue + " " + afterCursor
 		mentionIndex = position
 	}
 
+	return { newValue, mentionIndex }
+}
+
+export function insertMentionDirectly(text: string, position: number, value: string): { newValue: string; mentionIndex: number } {
+	const beforeCursor = text.slice(0, position)
+	const afterCursor = text.slice(position)
+
+	// For file/folder paths that contain spaces, wrap them in quotes
+	let formattedValue = value
+	if (value.startsWith("/") && value.includes(" ")) {
+		formattedValue = `"${value}"`
+	}
+
+	const newValue = beforeCursor + "@" + formattedValue + " " + afterCursor
+	const mentionIndex = position
 	return { newValue, mentionIndex }
 }
 
@@ -65,6 +86,19 @@ export interface ContextMenuQueryItem {
 	value?: string
 	label?: string
 	description?: string
+}
+
+const DEFAULT_CONTEXT_MENU_OPTIONS = [
+	ContextMenuOptionType.URL,
+	ContextMenuOptionType.Problems,
+	ContextMenuOptionType.Terminal,
+	ContextMenuOptionType.Git,
+	ContextMenuOptionType.Folder,
+	ContextMenuOptionType.File,
+]
+
+export function getContextMenuOptionIndex(option: ContextMenuOptionType) {
+	return DEFAULT_CONTEXT_MENU_OPTIONS.findIndex((item) => item === option)
 }
 
 export function getContextMenuOptions(
@@ -106,14 +140,7 @@ export function getContextMenuOptions(
 			return commits.length > 0 ? [workingChanges, ...commits] : [workingChanges]
 		}
 
-		return [
-			{ type: ContextMenuOptionType.URL },
-			{ type: ContextMenuOptionType.Problems },
-			{ type: ContextMenuOptionType.Terminal },
-			{ type: ContextMenuOptionType.Git },
-			{ type: ContextMenuOptionType.Folder },
-			{ type: ContextMenuOptionType.File },
-		]
+		return DEFAULT_CONTEXT_MENU_OPTIONS.map((type) => ({ type }))
 	}
 
 	const lowerQuery = query.toLowerCase()

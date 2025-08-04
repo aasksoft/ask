@@ -1,50 +1,107 @@
+import { CODE_BLOCK_BG_COLOR } from "@/components/common/CodeBlock"
+import { useExtensionState } from "@/context/ExtensionStateContext"
+import { StateServiceClient } from "@/services/grpc-client"
+import { ApiConfiguration, openRouterDefaultModelId } from "@shared/api"
+import { StringRequest } from "@shared/proto/cline/common"
 import { VSCodeLink, VSCodeTextField } from "@vscode/webview-ui-toolkit/react"
 import Fuse from "fuse.js"
 import React, { KeyboardEvent, memo, useEffect, useMemo, useRef, useState } from "react"
 import { useRemark } from "react-remark"
 import { useMount } from "react-use"
 import styled from "styled-components"
-import { openRouterDefaultModelId } from "@shared/api"
-import { useExtensionState } from "@/context/ExtensionStateContext"
-import { vscode } from "@/utils/vscode"
 import { highlight } from "../history/HistoryView"
-import { ModelInfoView, normalizeApiConfiguration } from "./ApiOptions"
-import { CODE_BLOCK_BG_COLOR } from "@/components/common/CodeBlock"
+import { ModelInfoView } from "./common/ModelInfoView"
+import { getModeSpecificFields, normalizeApiConfiguration } from "./utils/providerUtils"
+import FeaturedModelCard from "./FeaturedModelCard"
 import ThinkingBudgetSlider from "./ThinkingBudgetSlider"
+import { useApiConfigurationHandlers } from "./utils/useApiConfigurationHandlers"
+import { Mode } from "@shared/storage/types"
+
+// Star icon for favorites
+const StarIcon = ({ isFavorite, onClick }: { isFavorite: boolean; onClick: (e: React.MouseEvent) => void }) => {
+	return (
+		<div
+			onClick={onClick}
+			style={{
+				cursor: "pointer",
+				color: isFavorite ? "var(--vscode-terminal-ansiBlue)" : "var(--vscode-descriptionForeground)",
+				marginLeft: "8px",
+				fontSize: "16px",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				userSelect: "none",
+				WebkitUserSelect: "none",
+			}}>
+			{isFavorite ? "★" : "☆"}
+		</div>
+	)
+}
 
 export interface OpenRouterModelPickerProps {
 	isPopup?: boolean
+	currentMode: Mode
 }
 
-const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }) => {
-	const { apiConfiguration, setApiConfiguration, openRouterModels } = useExtensionState()
-	const [searchTerm, setSearchTerm] = useState(apiConfiguration?.openRouterModelId || openRouterDefaultModelId)
+// Featured models for Cline provider
+const featuredModels = [
+	{
+		id: "anthropic/claude-sonnet-4",
+		description: "Recommended for agentic coding in Cline",
+		label: "Best",
+	},
+	{
+		id: "google/gemini-2.5-pro",
+		description: "Large 1M context window, great value",
+		label: "Trending",
+	},
+	{
+		id: "moonshotai/kimi-k2",
+		description: "Open source model topping coding benchmarks",
+		label: "New",
+	},
+]
+
+const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup, currentMode }) => {
+	const { handleModeFieldsChange } = useApiConfigurationHandlers()
+	const { apiConfiguration, openRouterModels, refreshOpenRouterModels } = useExtensionState()
+	const modeFields = getModeSpecificFields(apiConfiguration, currentMode)
+	const [searchTerm, setSearchTerm] = useState(modeFields.openRouterModelId || openRouterDefaultModelId)
 	const [isDropdownVisible, setIsDropdownVisible] = useState(false)
 	const [selectedIndex, setSelectedIndex] = useState(-1)
 	const dropdownRef = useRef<HTMLDivElement>(null)
 	const itemRefs = useRef<(HTMLDivElement | null)[]>([])
-	const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false)
 	const dropdownListRef = useRef<HTMLDivElement>(null)
 
 	const handleModelChange = (newModelId: string) => {
 		// could be setting invalid model id/undefined info but validation will catch it
-		setApiConfiguration({
-			...apiConfiguration,
-			...{
+
+		setSearchTerm(newModelId)
+
+		handleModeFieldsChange(
+			{
+				openRouterModelId: { plan: "planModeOpenRouterModelId", act: "actModeOpenRouterModelId" },
+				openRouterModelInfo: { plan: "planModeOpenRouterModelInfo", act: "actModeOpenRouterModelInfo" },
+			},
+			{
 				openRouterModelId: newModelId,
 				openRouterModelInfo: openRouterModels[newModelId],
 			},
-		})
-		setSearchTerm(newModelId)
+			currentMode,
+		)
 	}
 
 	const { selectedModelId, selectedModelInfo } = useMemo(() => {
-		return normalizeApiConfiguration(apiConfiguration)
-	}, [apiConfiguration])
+		return normalizeApiConfiguration(apiConfiguration, currentMode)
+	}, [apiConfiguration, currentMode])
 
-	useMount(() => {
-		vscode.postMessage({ type: "refreshOpenRouterModels" })
-	})
+	useMount(refreshOpenRouterModels)
+
+	// Sync external changes when the modelId changes
+	useEffect(() => {
+		const currentModelId = modeFields.openRouterModelId || openRouterDefaultModelId
+		setSearchTerm(currentModelId)
+	}, [modeFields.openRouterModelId])
 
 	useEffect(() => {
 		const handleClickOutside = (event: MouseEvent) => {
@@ -62,10 +119,8 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 	const modelIds = useMemo(() => {
 		const unfilteredModelIds = Object.keys(openRouterModels).sort((a, b) => a.localeCompare(b))
 
-		return apiConfiguration?.apiProvider === "cline"
-			? unfilteredModelIds.filter((id) => !id.includes(":free"))
-			: unfilteredModelIds
-	}, [openRouterModels, apiConfiguration?.apiProvider])
+		return modeFields.apiProvider === "cline" ? unfilteredModelIds.filter((id) => !id.includes(":free")) : unfilteredModelIds
+	}, [openRouterModels, modeFields.apiProvider])
 
 	const searchableItems = useMemo(() => {
 		return modelIds.map((id) => ({
@@ -87,12 +142,21 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 	}, [searchableItems])
 
 	const modelSearchResults = useMemo(() => {
-		const results: { id: string; html: string }[] = searchTerm
-			? highlight(fuse.search(searchTerm), "model-item-highlight")
-			: searchableItems
-		// results.sort((a, b) => a.id.localeCompare(b.id)) NOTE: sorting like this causes ids in objects to be reordered and mismatched
-		return results
-	}, [searchableItems, searchTerm, fuse])
+		const favoritedModelIds = apiConfiguration?.favoritedModelIds || []
+
+		// IMPORTANT: highlightjs has a bug where if you use sort/localCompare - "// results.sort((a, b) => a.id.localeCompare(b.id)) ...sorting like this causes ids in objects to be reordered and mismatched"
+
+		// First, get all favorited models
+		const favoritedModels = searchableItems.filter((item) => favoritedModelIds.includes(item.id))
+
+		// Then get search results for non-favorited models
+		const searchResults = searchTerm
+			? highlight(fuse.search(searchTerm), "model-item-highlight").filter((item) => !favoritedModelIds.includes(item.id))
+			: searchableItems.filter((item) => !favoritedModelIds.includes(item.id))
+
+		// Combine favorited models with search results
+		return [...favoritedModels, ...searchResults]
+	}, [searchableItems, searchTerm, fuse, apiConfiguration?.favoritedModelIds])
 
 	const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
 		if (!isDropdownVisible) return
@@ -146,8 +210,11 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 
 	const showBudgetSlider = useMemo(() => {
 		return (
+			selectedModelId?.toLowerCase().includes("claude-sonnet-4") ||
+			selectedModelId?.toLowerCase().includes("claude-opus-4") ||
 			selectedModelId?.toLowerCase().includes("claude-3-7-sonnet") ||
-			selectedModelId?.toLowerCase().includes("claude-3.7-sonnet")
+			selectedModelId?.toLowerCase().includes("claude-3.7-sonnet") ||
+			selectedModelId?.toLowerCase().includes("claude-3.7-sonnet:thinking")
 		)
 	}, [selectedModelId])
 
@@ -165,13 +232,32 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 				<label htmlFor="model-search">
 					<span style={{ fontWeight: 500 }}>Model</span>
 				</label>
+
+				{modeFields.apiProvider === "cline" && (
+					<div style={{ marginBottom: "6px", marginTop: 4 }}>
+						{featuredModels.map((model) => (
+							<FeaturedModelCard
+								key={model.id}
+								modelId={model.id}
+								description={model.description}
+								label={model.label}
+								isSelected={selectedModelId === model.id}
+								onClick={() => {
+									handleModelChange(model.id)
+									setIsDropdownVisible(false)
+								}}
+							/>
+						))}
+					</div>
+				)}
+
 				<DropdownWrapper ref={dropdownRef}>
 					<VSCodeTextField
 						id="model-search"
 						placeholder="Search and select a model..."
 						value={searchTerm}
 						onInput={(e) => {
-							handleModelChange((e.target as HTMLInputElement)?.value?.toLowerCase())
+							setSearchTerm((e.target as HTMLInputElement)?.value.toLowerCase() || "")
 							setIsDropdownVisible(true)
 						}}
 						onFocus={() => setIsDropdownVisible(true)}
@@ -186,7 +272,7 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 								className="input-icon-button codicon codicon-close"
 								aria-label="Clear search"
 								onClick={() => {
-									handleModelChange("")
+									setSearchTerm("")
 									setIsDropdownVisible(true)
 								}}
 								slot="end"
@@ -201,21 +287,33 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 					</VSCodeTextField>
 					{isDropdownVisible && (
 						<DropdownList ref={dropdownListRef}>
-							{modelSearchResults.map((item, index) => (
-								<DropdownItem
-									key={item.id}
-									ref={(el) => (itemRefs.current[index] = el)}
-									isSelected={index === selectedIndex}
-									onMouseEnter={() => setSelectedIndex(index)}
-									onClick={() => {
-										handleModelChange(item.id)
-										setIsDropdownVisible(false)
-									}}
-									dangerouslySetInnerHTML={{
-										__html: item.html,
-									}}
-								/>
-							))}
+							{modelSearchResults.map((item, index) => {
+								const isFavorite = (apiConfiguration?.favoritedModelIds || []).includes(item.id)
+								return (
+									<DropdownItem
+										key={item.id}
+										ref={(el) => (itemRefs.current[index] = el)}
+										isSelected={index === selectedIndex}
+										onMouseEnter={() => setSelectedIndex(index)}
+										onClick={() => {
+											handleModelChange(item.id)
+											setIsDropdownVisible(false)
+										}}>
+										<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+											<span dangerouslySetInnerHTML={{ __html: item.html }} />
+											<StarIcon
+												isFavorite={isFavorite}
+												onClick={(e) => {
+													e.stopPropagation()
+													StateServiceClient.toggleFavoriteModel(
+														StringRequest.create({ value: item.id }),
+													).catch((error) => console.error("Failed to toggle favorite model:", error))
+												}}
+											/>
+										</div>
+									</DropdownItem>
+								)
+							})}
 						</DropdownList>
 					)}
 				</DropdownWrapper>
@@ -223,17 +321,9 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 
 			{hasInfo ? (
 				<>
-					{showBudgetSlider && (
-						<ThinkingBudgetSlider apiConfiguration={apiConfiguration} setApiConfiguration={setApiConfiguration} />
-					)}
+					{showBudgetSlider && <ThinkingBudgetSlider currentMode={currentMode} />}
 
-					<ModelInfoView
-						selectedModelId={selectedModelId}
-						modelInfo={selectedModelInfo}
-						isDescriptionExpanded={isDescriptionExpanded}
-						setIsDescriptionExpanded={setIsDescriptionExpanded}
-						isPopup={isPopup}
-					/>
+					<ModelInfoView selectedModelId={selectedModelId} modelInfo={selectedModelInfo} isPopup={isPopup} />
 				</>
 			) : (
 				<p
@@ -250,8 +340,8 @@ const OpenRouterModelPicker: React.FC<OpenRouterModelPickerProps> = ({ isPopup }
 						If you're unsure which model to choose, Cline works best with{" "}
 						<VSCodeLink
 							style={{ display: "inline", fontSize: "inherit" }}
-							onClick={() => handleModelChange("anthropic/claude-3.7-sonnet")}>
-							anthropic/claude-3.7-sonnet.
+							onClick={() => handleModelChange("anthropic/claude-sonnet-4")}>
+							anthropic/claude-sonnet-4.
 						</VSCodeLink>
 						You can also try searching "free" for no-cost options currently available.
 					</>

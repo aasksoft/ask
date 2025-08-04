@@ -1,340 +1,318 @@
-import { VSCodeButton, VSCodeCheckbox, VSCodeLink, VSCodeTextArea } from "@vscode/webview-ui-toolkit/react"
-import { memo, useCallback, useEffect, useState } from "react"
+import HeroTooltip from "@/components/common/HeroTooltip"
 import { useExtensionState } from "@/context/ExtensionStateContext"
-import { validateApiConfiguration, validateModelId } from "@/utils/validate"
-import { vscode } from "@/utils/vscode"
-import SettingsButton from "@/components/common/SettingsButton"
-import ApiOptions from "./ApiOptions"
-import { TabButton } from "../mcp/configuration/McpConfigurationView"
-import { useEvent } from "react-use"
+import { StateServiceClient } from "@/services/grpc-client"
 import { ExtensionMessage } from "@shared/ExtensionMessage"
-const { IS_DEV } = process.env
+import { ResetStateRequest } from "@shared/proto/cline/state"
+import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
+import { CheckCheck, FlaskConical, Info, LucideIcon, Settings, SquareMousePointer, SquareTerminal, Webhook } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { useEvent } from "react-use"
+import { Tab, TabContent, TabHeader, TabList, TabTrigger } from "../common/Tab"
+import FeatureSettingsSection from "./sections/FeatureSettingsSection"
+import SectionHeader from "./SectionHeader"
+import TerminalSettingsSection from "./sections/TerminalSettingsSection"
+import ApiConfigurationSection from "./sections/ApiConfigurationSection"
+import GeneralSettingsSection from "./sections/GeneralSettingsSection"
+import BrowserSettingsSection from "./sections/BrowserSettingsSection"
+import DebugSection from "./sections/DebugSection"
+import AboutSection from "./sections/AboutSection"
+
+const IS_DEV = process.env.IS_DEV
+
+// Styles for the tab system
+const settingsTabsContainer = "flex flex-1 overflow-hidden [&.narrow_.tab-label]:hidden"
+const settingsTabList =
+	"w-48 data-[compact=true]:w-12 flex-shrink-0 flex flex-col overflow-y-auto overflow-x-hidden border-r border-[var(--vscode-sideBar-background)]"
+const settingsTabTrigger =
+	"whitespace-nowrap overflow-hidden min-w-0 h-12 px-4 py-3 box-border flex items-center border-l-2 border-transparent text-[var(--vscode-foreground)] opacity-70 bg-transparent hover:bg-[var(--vscode-list-hoverBackground)] data-[compact=true]:w-12 data-[compact=true]:p-4 cursor-pointer"
+const settingsTabTriggerActive =
+	"opacity-100 border-l-2 border-l-[var(--vscode-focusBorder)] border-t-0 border-r-0 border-b-0 bg-[var(--vscode-list-activeSelectionBackground)]"
+
+// Tab definitions
+interface SettingsTab {
+	id: string
+	name: string
+	tooltipText: string
+	headerText: string
+	icon: LucideIcon
+}
+
+export const SETTINGS_TABS: SettingsTab[] = [
+	{
+		id: "api-config",
+		name: "API Configuration",
+		tooltipText: "API Configuration",
+		headerText: "API Configuration",
+		icon: Webhook,
+	},
+	{
+		id: "general",
+		name: "General",
+		tooltipText: "General Settings",
+		headerText: "General Settings",
+		icon: Settings,
+	},
+	{
+		id: "features",
+		name: "Features",
+		tooltipText: "Feature Settings",
+		headerText: "Feature Settings",
+		icon: CheckCheck,
+	},
+	{
+		id: "browser",
+		name: "Browser",
+		tooltipText: "Browser Settings",
+		headerText: "Browser Settings",
+		icon: SquareMousePointer,
+	},
+	{
+		id: "terminal",
+		name: "Terminal",
+		tooltipText: "Terminal Settings",
+		headerText: "Terminal Settings",
+		icon: SquareTerminal,
+	},
+	// Only show in dev mode
+	...(IS_DEV
+		? [
+				{
+					id: "debug",
+					name: "Debug",
+					tooltipText: "Debug Tools",
+					headerText: "Debug",
+					icon: FlaskConical,
+				},
+			]
+		: []),
+	{
+		id: "about",
+		name: "About",
+		tooltipText: "About Cline",
+		headerText: "About",
+		icon: Info,
+	},
+]
 
 type SettingsViewProps = {
 	onDone: () => void
+	targetSection?: string
 }
 
-const SettingsView = ({ onDone }: SettingsViewProps) => {
-	const {
-		apiConfiguration,
-		version,
-		customInstructions,
-		setCustomInstructions,
-		openRouterModels,
-		telemetrySetting,
-		setTelemetrySetting,
-		chatSettings,
-		planActSeparateModelsSetting,
-		setPlanActSeparateModelsSetting,
-	} = useExtensionState()
-	const [apiErrorMessage, setApiErrorMessage] = useState<string | undefined>(undefined)
-	const [modelIdErrorMessage, setModelIdErrorMessage] = useState<string | undefined>(undefined)
-	const [pendingTabChange, setPendingTabChange] = useState<"plan" | "act" | null>(null)
+const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
+	// Track active tab
+	const [activeTab, setActiveTab] = useState<string>(targetSection || SETTINGS_TABS[0].id)
+	// Track if we're currently switching modes
 
-	const handleSubmit = (withoutDone: boolean = false) => {
-		const apiValidationResult = validateApiConfiguration(apiConfiguration)
-		const modelIdValidationResult = validateModelId(apiConfiguration, openRouterModels)
+	const { version } = useExtensionState()
 
-		// setApiErrorMessage(apiValidationResult)
-		// setModelIdErrorMessage(modelIdValidationResult)
+	const handleMessage = useCallback((event: MessageEvent) => {
+		const message: ExtensionMessage = event.data
+		switch (message.type) {
+			// Handle tab navigation through targetSection prop instead
+			case "grpc_response":
+				if (message.grpc_response?.message?.key === "scrollToSettings") {
+					const tabId = message.grpc_response?.message?.value
+					if (tabId) {
+						console.log("Opening settings tab from GRPC response:", tabId)
+						// Check if the value corresponds to a valid tab ID
+						const isValidTabId = SETTINGS_TABS.some((tab) => tab.id === tabId)
 
-		let apiConfigurationToSubmit = apiConfiguration
-		if (!apiValidationResult && !modelIdValidationResult) {
-			// vscode.postMessage({ type: "apiConfiguration", apiConfiguration })
-			// vscode.postMessage({
-			// 	type: "customInstructions",
-			// 	text: customInstructions,
-			// })
-			// vscode.postMessage({
-			// 	type: "telemetrySetting",
-			// 	text: telemetrySetting,
-			// })
-			// console.log("handleSubmit", withoutDone)
-			// vscode.postMessage({
-			// 	type: "separateModeSetting",
-			// 	text: separateModeSetting,
-			// })
-		} else {
-			// if the api configuration is invalid, we don't save it
-			apiConfigurationToSubmit = undefined
-		}
+						if (isValidTabId) {
+							// Set the active tab directly
+							setActiveTab(tabId)
+						} else {
+							// Fall back to the old behavior of scrolling to an element
+							setTimeout(() => {
+								const element = document.getElementById(tabId)
+								if (element) {
+									element.scrollIntoView({ behavior: "smooth" })
 
-		vscode.postMessage({
-			type: "updateSettings",
-			planActSeparateModelsSetting,
-			customInstructionsSetting: customInstructions,
-			telemetrySetting,
-			apiConfiguration: apiConfigurationToSubmit,
-		})
+									element.style.transition = "background-color 0.5s ease"
+									element.style.backgroundColor = "var(--vscode-textPreformat-background)"
 
-		if (!withoutDone) {
-			onDone()
-		}
-	}
-
-	useEffect(() => {
-		setApiErrorMessage(undefined)
-		setModelIdErrorMessage(undefined)
-	}, [apiConfiguration])
-
-	// validate as soon as the component is mounted
-	/*
-    useEffect will use stale values of variables if they are not included in the dependency array. 
-    so trying to use useEffect with a dependency array of only one value for example will use any 
-    other variables' old values. In most cases you don't want this, and should opt to use react-use 
-    hooks.
-    
-        // uses someVar and anotherVar
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [someVar])
-	If we only want to run code once on mount we can use react-use's useEffectOnce or useMount
-    */
-
-	const handleMessage = useCallback(
-		(event: MessageEvent) => {
-			const message: ExtensionMessage = event.data
-			switch (message.type) {
-				case "didUpdateSettings":
-					if (pendingTabChange) {
-						vscode.postMessage({
-							type: "togglePlanActMode",
-							chatSettings: {
-								mode: pendingTabChange,
-							},
-						})
-						setPendingTabChange(null)
+									setTimeout(() => {
+										element.style.backgroundColor = "transparent"
+									}, 1200)
+								}
+							}, 300)
+						}
 					}
-					break
-			}
-		},
-		[pendingTabChange],
-	)
+				}
+				break
+		}
+	}, [])
 
 	useEvent("message", handleMessage)
 
-	const handleResetState = () => {
-		vscode.postMessage({ type: "resetState" })
+	const handleResetState = async (resetGlobalState?: boolean) => {
+		try {
+			await StateServiceClient.resetState(
+				ResetStateRequest.create({
+					global: resetGlobalState,
+				}),
+			)
+		} catch (error) {
+			console.error("Failed to reset state:", error)
+		}
 	}
 
-	const handleTabChange = (tab: "plan" | "act") => {
-		if (tab === chatSettings.mode) {
-			return
+	// Update active tab when targetSection changes
+	useEffect(() => {
+		if (targetSection) {
+			setActiveTab(targetSection)
 		}
-		setPendingTabChange(tab)
-		handleSubmit(true)
-	}
+	}, [targetSection])
+
+	// Enhanced tab change handler with debugging
+	const handleTabChange = useCallback(
+		(tabId: string) => {
+			console.log("Tab change requested:", tabId, "Current:", activeTab)
+			setActiveTab(tabId)
+		},
+		[activeTab],
+	)
+
+	// Debug tab changes
+	useEffect(() => {
+		console.log("Active tab changed to:", activeTab)
+	}, [activeTab])
+
+	// Track whether we're in compact mode
+	const [isCompactMode, setIsCompactMode] = useState(false)
+	const containerRef = useRef<HTMLDivElement>(null)
+
+	// Setup resize observer to detect when we should switch to compact mode
+	useEffect(() => {
+		if (!containerRef.current) return
+
+		const observer = new ResizeObserver((entries) => {
+			for (const entry of entries) {
+				// If container width is less than 500px, switch to compact mode
+				setIsCompactMode(entry.contentRect.width < 500)
+			}
+		})
+
+		observer.observe(containerRef.current)
+
+		return () => {
+			observer?.disconnect()
+		}
+	}, [])
 
 	return (
-		<div
-			style={{
-				position: "fixed",
-				top: 0,
-				left: 0,
-				right: 0,
-				bottom: 0,
-				padding: "10px 0px 0px 20px",
-				display: "flex",
-				flexDirection: "column",
-				overflow: "hidden",
-			}}>
-			<div
-				style={{
-					display: "flex",
-					justifyContent: "space-between",
-					alignItems: "center",
-					marginBottom: "13px",
-					paddingRight: 17,
-				}}>
-				<h3 style={{ color: "var(--vscode-foreground)", margin: 0 }}>Settings</h3>
-				<VSCodeButton onClick={() => handleSubmit(false)}>Done</VSCodeButton>
+		<Tab>
+			<TabHeader className="flex justify-between items-center gap-2">
+				<div className="flex items-center gap-1">
+					<h3 className="text-[var(--vscode-foreground)] m-0">Settings</h3>
+				</div>
+				<div className="flex gap-2">
+					{/* All settings now save immediately, so only show Done button */}
+					<VSCodeButton onClick={onDone}>Done</VSCodeButton>
+				</div>
+			</TabHeader>
+
+			{/* Vertical tabs layout */}
+			<div ref={containerRef} className={`${settingsTabsContainer} ${isCompactMode ? "narrow" : ""}`}>
+				{/* Tab sidebar */}
+				<TabList
+					value={activeTab}
+					onValueChange={handleTabChange}
+					className={settingsTabList}
+					data-compact={isCompactMode}>
+					{SETTINGS_TABS.map((tab) =>
+						isCompactMode ? (
+							<HeroTooltip key={tab.id} content={tab.tooltipText} placement="right">
+								<div
+									className={`${
+										activeTab === tab.id
+											? `${settingsTabTrigger} ${settingsTabTriggerActive}`
+											: settingsTabTrigger
+									} focus:ring-0`}
+									data-compact={isCompactMode}
+									data-testid={`tab-${tab.id}`}
+									data-value={tab.id}
+									onClick={() => {
+										console.log("Compact tab clicked:", tab.id)
+										handleTabChange(tab.id)
+									}}>
+									<div className={`flex items-center gap-2 ${isCompactMode ? "justify-center" : ""}`}>
+										<tab.icon className="w-4 h-4" />
+										<span className="tab-label">{tab.name}</span>
+									</div>
+								</div>
+							</HeroTooltip>
+						) : (
+							<TabTrigger
+								key={tab.id}
+								value={tab.id}
+								className={`${
+									activeTab === tab.id
+										? `${settingsTabTrigger} ${settingsTabTriggerActive}`
+										: settingsTabTrigger
+								} focus:ring-0`}
+								data-compact={isCompactMode}
+								data-testid={`tab-${tab.id}`}>
+								<div className={`flex items-center gap-2 ${isCompactMode ? "justify-center" : ""}`}>
+									<tab.icon className="w-4 h-4" />
+									<span className="tab-label">{tab.name}</span>
+								</div>
+							</TabTrigger>
+						),
+					)}
+				</TabList>
+
+				{/* Helper function to render section header */}
+				{(() => {
+					const renderSectionHeader = (tabId: string) => {
+						const tab = SETTINGS_TABS.find((t) => t.id === tabId)
+						if (!tab) return null
+
+						return (
+							<SectionHeader>
+								<div className="flex items-center gap-2">
+									{(() => {
+										const Icon = tab.icon
+										return <Icon className="w-4" />
+									})()}
+									<div>{tab.headerText}</div>
+								</div>
+							</SectionHeader>
+						)
+					}
+
+					return (
+						<TabContent className="flex-1 overflow-auto">
+							{/* API Configuration Tab */}
+							{activeTab === "api-config" && <ApiConfigurationSection renderSectionHeader={renderSectionHeader} />}
+
+							{/* General Settings Tab */}
+							{activeTab === "general" && <GeneralSettingsSection renderSectionHeader={renderSectionHeader} />}
+
+							{/* Feature Settings Tab */}
+							{activeTab === "features" && <FeatureSettingsSection renderSectionHeader={renderSectionHeader} />}
+
+							{/* Browser Settings Tab */}
+							{activeTab === "browser" && <BrowserSettingsSection renderSectionHeader={renderSectionHeader} />}
+
+							{/* Terminal Settings Tab */}
+							{activeTab === "terminal" && <TerminalSettingsSection renderSectionHeader={renderSectionHeader} />}
+
+							{/* Debug Tab (only in dev mode) */}
+							{IS_DEV && activeTab === "debug" && (
+								<DebugSection onResetState={handleResetState} renderSectionHeader={renderSectionHeader} />
+							)}
+
+							{/* About Tab */}
+							{activeTab === "about" && (
+								<AboutSection version={version} renderSectionHeader={renderSectionHeader} />
+							)}
+						</TabContent>
+					)
+				})()}
 			</div>
-			<div
-				style={{
-					flexGrow: 1,
-					overflowY: "scroll",
-					paddingRight: 8,
-					display: "flex",
-					flexDirection: "column",
-				}}>
-				{/* Tabs container */}
-				{planActSeparateModelsSetting ? (
-					<div
-						style={{
-							border: "1px solid var(--vscode-panel-border)",
-							borderRadius: "4px",
-							padding: "10px",
-							marginBottom: "20px",
-							background: "var(--vscode-panel-background)",
-						}}>
-						<div
-							style={{
-								display: "flex",
-								gap: "1px",
-								marginBottom: "10px",
-								marginTop: -8,
-								borderBottom: "1px solid var(--vscode-panel-border)",
-							}}>
-							<TabButton isActive={chatSettings.mode === "plan"} onClick={() => handleTabChange("plan")}>
-								Plan Mode
-							</TabButton>
-							<TabButton isActive={chatSettings.mode === "act"} onClick={() => handleTabChange("act")}>
-								Act Mode
-							</TabButton>
-						</div>
-
-						{/* Content container */}
-						<div style={{ marginBottom: -12 }}>
-							<ApiOptions
-								key={chatSettings.mode}
-								showModelOptions={true}
-								apiErrorMessage={apiErrorMessage}
-								modelIdErrorMessage={modelIdErrorMessage}
-							/>
-						</div>
-					</div>
-				) : (
-					<ApiOptions
-						key={"single"}
-						showModelOptions={true}
-						apiErrorMessage={apiErrorMessage}
-						modelIdErrorMessage={modelIdErrorMessage}
-					/>
-				)}
-
-				<div style={{ marginBottom: 5 }}>
-					<VSCodeTextArea
-						value={customInstructions ?? ""}
-						style={{ width: "100%" }}
-						resize="vertical"
-						rows={4}
-						placeholder={'e.g. "Run unit tests at the end", "Use TypeScript with async/await", "Speak in Spanish"'}
-						onInput={(e: any) => setCustomInstructions(e.target?.value ?? "")}>
-						<span style={{ fontWeight: "500" }}>Custom Instructions</span>
-					</VSCodeTextArea>
-					<p
-						style={{
-							fontSize: "12px",
-							marginTop: "5px",
-							color: "var(--vscode-descriptionForeground)",
-						}}>
-						These instructions are added to the end of the system prompt sent with every request.
-					</p>
-				</div>
-
-				<div style={{ marginBottom: 5 }}>
-					<VSCodeCheckbox
-						style={{ marginBottom: "5px" }}
-						checked={planActSeparateModelsSetting}
-						onChange={(e: any) => {
-							const checked = e.target.checked === true
-							setPlanActSeparateModelsSetting(checked)
-						}}>
-						Use different models for Plan and Act modes
-					</VSCodeCheckbox>
-					<p
-						style={{
-							fontSize: "12px",
-							marginTop: "5px",
-							color: "var(--vscode-descriptionForeground)",
-						}}>
-						Switching between Plan and Act mode will persist the API and model used in the previous mode. This may be
-						helpful e.g. when using a strong reasoning model to architect a plan for a cheaper coding model to act on.
-					</p>
-				</div>
-
-				<div style={{ marginBottom: 5 }}>
-					<VSCodeCheckbox
-						style={{ marginBottom: "5px" }}
-						checked={telemetrySetting === "enabled"}
-						onChange={(e: any) => {
-							const checked = e.target.checked === true
-							setTelemetrySetting(checked ? "enabled" : "disabled")
-						}}>
-						Allow anonymous error and usage reporting
-					</VSCodeCheckbox>
-					<p
-						style={{
-							fontSize: "12px",
-							marginTop: "5px",
-							color: "var(--vscode-descriptionForeground)",
-						}}>
-						Help improve Cline by sending anonymous usage data and error reports. No code, prompts, or personal
-						information are ever sent. See our{" "}
-						<VSCodeLink href="https://docs.cline.bot/more-info/telemetry" style={{ fontSize: "inherit" }}>
-							telemetry overview
-						</VSCodeLink>{" "}
-						and{" "}
-						<VSCodeLink href="https://cline.bot/privacy" style={{ fontSize: "inherit" }}>
-							privacy policy
-						</VSCodeLink>{" "}
-						for more details.
-					</p>
-				</div>
-
-				{IS_DEV && (
-					<>
-						<div style={{ marginTop: "10px", marginBottom: "4px" }}>Debug</div>
-						<VSCodeButton onClick={handleResetState} style={{ marginTop: "5px", width: "auto" }}>
-							Reset State
-						</VSCodeButton>
-						<p
-							style={{
-								fontSize: "12px",
-								marginTop: "5px",
-								color: "var(--vscode-descriptionForeground)",
-							}}>
-							This will reset all global state and secret storage in the extension.
-						</p>
-					</>
-				)}
-
-				<div
-					style={{
-						marginTop: "auto",
-						paddingRight: 8,
-						display: "flex",
-						justifyContent: "center",
-					}}>
-					<SettingsButton
-						onClick={() => vscode.postMessage({ type: "openExtensionSettings" })}
-						style={{
-							margin: "0 0 16px 0",
-						}}>
-						<i className="codicon codicon-settings-gear" />
-						Advanced Settings
-					</SettingsButton>
-				</div>
-				<div
-					style={{
-						textAlign: "center",
-						color: "var(--vscode-descriptionForeground)",
-						fontSize: "12px",
-						lineHeight: "1.2",
-						padding: "0 8px 15px 0",
-					}}>
-					<p
-						style={{
-							wordWrap: "break-word",
-							margin: 0,
-							padding: 0,
-						}}>
-						If you have any questions or feedback, feel free to open an issue at{" "}
-						<VSCodeLink href="https://github.com/cline/cline" style={{ display: "inline" }}>
-							https://github.com/cline/cline
-						</VSCodeLink>
-					</p>
-					<p
-						style={{
-							fontStyle: "italic",
-							margin: "10px 0 0 0",
-							padding: 0,
-						}}>
-						v{version}
-					</p>
-				</div>
-			</div>
-		</div>
+		</Tab>
 	)
 }
 
-export default memo(SettingsView)
+export default SettingsView
